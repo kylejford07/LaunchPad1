@@ -297,9 +297,34 @@ export const AIInterviewStudio = (_props: AIInterviewStudioProps) => {
   const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [timerStarted, setTimerStarted] = useState(false);
+  const [showPaywall, setShowPaywall] = useState(false);
   const audioRecorderRef = useRef<AudioRecorder | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
+
+  // Interview limit tracking
+  const getInterviewCount = () => {
+    const today = new Date().toDateString();
+    const stored = localStorage.getItem('interviewData');
+    if (stored) {
+      const data = JSON.parse(stored);
+      if (data.date === today) {
+        return data.count;
+      }
+    }
+    return 0;
+  };
+
+  const incrementInterviewCount = () => {
+    const today = new Date().toDateString();
+    const count = getInterviewCount() + 1;
+    localStorage.setItem('interviewData', JSON.stringify({ date: today, count }));
+    return count;
+  };
+
+  const hasReachedLimit = () => {
+    return getInterviewCount() >= 3;
+  };
 
   // Check API key on mount
   useEffect(() => {
@@ -497,127 +522,125 @@ export const AIInterviewStudio = (_props: AIInterviewStudioProps) => {
     const strengths: string[] = [];
     const improvements: string[] = [];
 
-    // 1. Keyword matching (25 points) - More weight on technical accuracy
+    // 1. Technical Accuracy - Keyword matching (33 points) - MOST IMPORTANT
     const keywordMatches = question.expectedKeywords?.filter(keyword => answer.toLowerCase().includes(keyword.toLowerCase())) || [];
     const keywordCoverage = keywordMatches.length / (question.expectedKeywords?.length || 1);
-    const keywordScore = Math.round(keywordCoverage * 25);
+    
+    // Heavily weight accuracy - if they hit the key concepts, they understand it
+    let keywordScore = 0;
+    if (question.difficulty === 'hard') {
+      // For hard questions, 50% coverage = full points (very lenient)
+      keywordScore = Math.min(33, Math.round((keywordCoverage / 0.5) * 33));
+    } else if (question.difficulty === 'medium') {
+      // For medium, 60% coverage = full points
+      keywordScore = Math.min(33, Math.round((keywordCoverage / 0.6) * 33));
+    } else {
+      // For easy, 70% coverage = full points
+      keywordScore = Math.min(33, Math.round((keywordCoverage / 0.7) * 33));
+    }
     score += keywordScore;
     
-    if (keywordCoverage >= 0.9) {
-      strengths.push(`Excellent keyword coverage (${keywordMatches.length}/${question.expectedKeywords?.length || 0} key terms)`);
-    } else if (keywordCoverage >= 0.7) {
-      strengths.push('Covered most key technical concepts');
-      improvements.push(`Missing ${(question.expectedKeywords?.length || 0) - keywordMatches.length} important terms`);
+    if (keywordCoverage >= 0.7) {
+      strengths.push(`Excellent technical accuracy (${keywordMatches.length}/${question.expectedKeywords?.length || 0} key concepts)`);
     } else if (keywordCoverage >= 0.5) {
-      improvements.push(`Only covered ${keywordMatches.length}/${question.expectedKeywords?.length || 0} key terms - include more technical terminology`);
+      strengths.push('Good grasp of core concepts');
+    } else if (keywordCoverage >= 0.3) {
+      improvements.push(`Cover more key concepts (${keywordMatches.length}/${question.expectedKeywords?.length || 0})`);
     } else {
-      improvements.push(`Critical gap: Missing most key terms (${keywordMatches.length}/${question.expectedKeywords?.length || 0})`);
+      improvements.push(`Missing critical concepts (${keywordMatches.length}/${question.expectedKeywords?.length || 0})`);
     }
 
-    // 2. Answer length and detail (20 points) - Stricter requirements
+    // 2. Length/Completeness (12 points) - 12% of grade
     const words = answer.trim().split(/\s+/).length;
-    const sentences = answer.split(/[.!?]+/).filter(s => s.trim().length > 0).length;
-    let lengthScore = 0;
+    const hasCode = /```|function|const|let|var|class|def|public|private|\{|\}|=>/.test(answer);
+    const isCodingQuestion = question.category === 'coding';
     
-    if (words >= 150 && sentences >= 8) {
-      lengthScore = 20;
-      strengths.push(`Comprehensive answer (${words} words, ${sentences} sentences)`);
-    } else if (words >= 100 && sentences >= 6) {
-      lengthScore = 17;
-      strengths.push('Good level of detail');
-    } else if (words >= 75 && sentences >= 4) {
-      lengthScore = 14;
-      improvements.push('Add more depth - aim for 100+ words with specific examples');
+    let completenessScore = 0;
+    
+    if (isCodingQuestion && hasCode) {
+      // For coding questions, having code is most important
+      completenessScore = 12;
+      strengths.push('Provided code implementation');
+    } else if (isCodingQuestion && !hasCode) {
+      completenessScore = 4;
+      improvements.push('Include actual code implementation');
     } else if (words >= 50) {
-      lengthScore = 10;
-      improvements.push(`Answer too brief (${words} words) - expand with more details and examples`);
-    } else if (words >= 25) {
-      lengthScore = 6;
-      improvements.push(`Insufficient detail (${words} words) - provide comprehensive explanations`);
+      // For non-coding, just check if they explained enough
+      completenessScore = 12;
+    } else if (words >= 30) {
+      completenessScore = 8;
     } else {
-      lengthScore = 2;
-      improvements.push(`Answer far too short (${words} words) - minimum 75 words expected`);
+      completenessScore = 5;
+      improvements.push('Provide more complete explanation');
     }
-    score += lengthScore;
+    score += completenessScore;
 
-    // 3. Structure and clarity (20 points) - More precise evaluation
-    const hasParagraphs = answer.includes('\n\n') || answer.split('\n').length > 2;
-    const hasExamples = answer.toLowerCase().includes('example') || answer.toLowerCase().includes('for instance') || answer.toLowerCase().includes('such as') || answer.toLowerCase().includes('like when');
-    const hasComparisons = answer.toLowerCase().includes('versus') || answer.toLowerCase().includes('compared to') || answer.toLowerCase().includes('vs') || answer.toLowerCase().includes('difference between');
-    const hasNumberedPoints = /\d+\.|first|second|third|finally/i.test(answer);
+    // 3. Explanation Quality (18 points) - Did they explain HOW/WHY?
+    const sentences = answer.split(/[.!?]+/).filter(s => s.trim().length > 0).length;
+    const hasExamples = answer.toLowerCase().includes('example') || answer.toLowerCase().includes('for instance') || answer.toLowerCase().includes('such as') || answer.toLowerCase().includes('like when') || answer.toLowerCase().includes('e.g.');
+    const hasExplanation = sentences >= 2; // At least 2 sentences shows they explained
     
-    let structureScore = 0;
-    if (hasParagraphs) {
-      structureScore += 6;
-      strengths.push('Well-organized with clear structure');
-    } else {
-      improvements.push('Break answer into logical paragraphs or sections');
+    let explanationScore = 6; // Base points
+    
+    if (hasExplanation) {
+      explanationScore += 6;
     }
     
     if (hasExamples) {
-      structureScore += 7;
-      strengths.push('Included concrete examples');
-    } else {
-      improvements.push('Add real-world examples to demonstrate understanding');
+      explanationScore += 6;
+      strengths.push('Included helpful examples');
     }
     
-    if (hasComparisons || hasNumberedPoints) {
-      structureScore += 7;
-      strengths.push('Used comparisons or structured points effectively');
-    } else {
-      improvements.push('Consider using comparisons or numbered points for clarity');
-    }
-    
-    score += structureScore;
+    score += Math.min(18, explanationScore);
 
-    // 4. Technical depth (20 points) - More comprehensive evaluation
-    const technicalIndicators = ['implement', 'architecture', 'design', 'optimize', 'performance', 'scale', 'algorithm', 'complexity', 'pattern', 'best practice', 'framework', 'library', 'api', 'database', 'cache', 'async', 'sync', 'thread', 'memory', 'latency'];
+    // 4. Technical Depth (22 points) - Specific implementation details
+    const technicalIndicators = ['implement', 'architecture', 'design', 'optimize', 'performance', 'scale', 'algorithm', 'complexity', 'pattern', 'best practice', 'framework', 'library', 'api', 'database', 'cache', 'async', 'sync', 'thread', 'memory', 'latency', 'component', 'function', 'method', 'class', 'interface', 'module', 'service', 'system', 'return', 'parameter', 'variable', 'loop', 'condition', 'array', 'object', 'string', 'number'];
     const technicalMatches = technicalIndicators.filter(indicator => answer.toLowerCase().includes(indicator));
-    const technicalDensity = technicalMatches.length / Math.max(1, words / 50); // Technical terms per 50 words
     
-    let depthScore = 0;
-    if (technicalMatches.length >= 8 && technicalDensity >= 0.8) {
-      depthScore = 20;
+    let depthScore = 8; // Base points for technical content
+    
+    if (technicalMatches.length >= 5) {
+      depthScore = 22;
       strengths.push(`Excellent technical depth (${technicalMatches.length} technical terms)`);
-    } else if (technicalMatches.length >= 5) {
-      depthScore = 15;
-      strengths.push('Good technical understanding');
     } else if (technicalMatches.length >= 3) {
-      depthScore = 10;
-      improvements.push('Include more technical implementation details and terminology');
+      depthScore = 18;
+      strengths.push('Good technical detail');
+    } else if (technicalMatches.length >= 1) {
+      depthScore = 13;
     } else {
-      depthScore = 5;
-      improvements.push('Lacks technical depth - discuss specific technologies, patterns, and implementation details');
+      improvements.push('Add more specific technical details');
     }
     score += depthScore;
 
-    // 5. Problem-solving approach (15 points) - Focus on reasoning quality
-    const problemSolvingKeywords = ['consider', 'approach', 'solution', 'analyze', 'evaluate', 'trade-off', 'alternative', 'because', 'therefore', 'however', 'although', 'while', 'whereas', 'pros', 'cons', 'advantage', 'disadvantage'];
+    // 5. Correctness & Reasoning (15 points) - Did they show understanding?
+    const problemSolvingKeywords = ['because', 'therefore', 'thus', 'so', 'since', 'due to', 'as a result', 'this allows', 'this ensures', 'this helps', 'this way', 'in order to'];
     const problemSolvingMatches = problemSolvingKeywords.filter(keyword => answer.toLowerCase().includes(keyword));
-    const hasReasoning = /because|since|due to|as a result|therefore|thus/i.test(answer);
-    const hasTradeoffs = /trade-?off|pros and cons|advantage.*disadvantage|benefit.*cost/i.test(answer);
+    const hasReasoning = problemSolvingMatches.length > 0;
     
-    let approachScore = 0;
-    if (problemSolvingMatches.length >= 5 && hasReasoning && hasTradeoffs) {
-      approachScore = 15;
-      strengths.push('Excellent analytical thinking with clear reasoning and trade-off analysis');
-    } else if (problemSolvingMatches.length >= 3 && hasReasoning) {
-      approachScore = 11;
-      strengths.push('Good problem-solving approach');
-    } else if (problemSolvingMatches.length >= 2) {
-      approachScore = 7;
-      improvements.push('Explain your reasoning more clearly - use "because", "therefore", discuss trade-offs');
+    let reasoningScore = 8; // Base points
+    
+    if (hasReasoning) {
+      reasoningScore += 7;
+      strengths.push('Explained reasoning clearly');
     } else {
-      approachScore = 3;
-      improvements.push('Missing critical thinking - explain WHY you chose this approach and discuss alternatives');
+      improvements.push('Explain WHY your solution works');
     }
-    score += approachScore;
+    
+    score += reasoningScore;
 
-    // Adjust score based on difficulty (stricter grading for easier questions)
-    if (question.difficulty === 'easy' && score < 80) {
-      score = Math.max(0, score - 5); // Penalize incomplete easy answers
-    } else if (question.difficulty === 'hard' && score >= 75) {
-      score = Math.min(100, score + 3); // Small bonus for good hard answers
+    // Adjust score based on difficulty - VERY generous for hard questions
+    if (question.difficulty === 'easy' && score < 70) {
+      score = Math.max(0, score - 2); // Tiny penalty for incomplete easy answers
+    } else if (question.difficulty === 'medium' && score >= 60) {
+      score = Math.min(100, score + 5); // Bonus for good medium answers
+    } else if (question.difficulty === 'hard' && score >= 55) {
+      score = Math.min(100, score + 10); // Large bonus for hard questions - accuracy matters most!
+    }
+    
+    // For coding questions, if they provided code with key concepts, boost score
+    if (isCodingQuestion && hasCode && keywordCoverage >= 0.5) {
+      score = Math.min(100, score + 5);
+      strengths.push('Provided working code solution');
     }
 
     // Generate precise, actionable feedback
@@ -689,7 +712,17 @@ export const AIInterviewStudio = (_props: AIInterviewStudioProps) => {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
   const handleStartInterview = () => {
+    // Check if user has reached daily limit
+    if (hasReachedLimit()) {
+      setShowPaywall(true);
+      speak("I'm sorry, but you've used all 3 of your free interviews for today. To continue practicing, please upgrade to premium for unlimited interviews!");
+      return;
+    }
+
     if (config.role && config.level && config.duration) {
+      // Increment interview count
+      incrementInterviewCount();
+      
       setStage('intro');
       speak(
         "Hi! I'm Alex, your AI interviewer. Let's get started with your technical interview!",
@@ -804,16 +837,24 @@ export const AIInterviewStudio = (_props: AIInterviewStudioProps) => {
       setCurrentAnswer('');
 
       // Personalized spoken feedback - wait for speech to finish before moving on
+      const isLastQuestion = currentQuestionIndex >= questions.length - 1;
       let feedbackText = '';
+      
       if (gradingResult.score >= 85) {
         setInterviewerMood('positive');
-        feedbackText = "That was fantastic! You really nailed the key concepts there. I'm impressed with your depth of knowledge.";
+        feedbackText = isLastQuestion 
+          ? "That was fantastic! You really nailed the key concepts there. Excellent work on this final question!"
+          : "That was fantastic! You really nailed the key concepts there. I'm impressed with your depth of knowledge.";
       } else if (gradingResult.score >= 70) {
         setInterviewerMood('positive');
-        feedbackText = "Nice work! You covered the important points well. That shows solid understanding.";
+        feedbackText = isLastQuestion
+          ? "Nice work! You covered the important points well. That shows solid understanding."
+          : "Nice work! You covered the important points well. That shows solid understanding.";
       } else {
         setInterviewerMood('neutral');
-        feedbackText = "Thanks for your answer. There's definitely room to expand on some of those concepts. Let's keep going!";
+        feedbackText = isLastQuestion
+          ? "Thanks for your answer. There's definitely room to expand on some of those concepts."
+          : "Thanks for your answer. There's definitely room to expand on some of those concepts. Let's keep going!";
       }
       
       // Speak feedback and wait for it to complete before moving to next question
@@ -886,6 +927,29 @@ export const AIInterviewStudio = (_props: AIInterviewStudioProps) => {
           <p className="text-lg text-gray-600 max-w-2xl mx-auto">
             Practice technical interviews with our AI interviewer and get instant, detailed feedback
           </p>
+          
+          {/* Interview Counter with Reset Button */}
+          <div className="mt-4 flex items-center gap-3">
+            <div className="inline-flex items-center gap-2 px-4 py-2 bg-white rounded-full shadow-md">
+              <Sparkles className="w-5 h-5 text-indigo-600" />
+              <span className="text-sm font-semibold text-gray-700">
+                Free Interviews Today: <span className="text-indigo-600">{3 - getInterviewCount()}/3</span>
+              </span>
+            </div>
+            
+            {/* Demo Reset Button */}
+            <button
+              onClick={() => {
+                localStorage.removeItem('interviewData');
+                window.location.reload();
+              }}
+              className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-semibold rounded-full shadow-md transition-all flex items-center gap-2"
+              title="Reset interview count (Demo only)"
+            >
+              <RotateCcw className="w-4 h-4" />
+              Reset Demo
+            </button>
+          </div>
         </motion.div>
 
         <AnimatePresence mode="wait">
@@ -921,6 +985,103 @@ export const AIInterviewStudio = (_props: AIInterviewStudioProps) => {
                 </div>
               </div>
             </motion.div>}
+
+          {/* Paywall Modal */}
+          {showPaywall && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
+              onClick={() => setShowPaywall(false)}
+            >
+              <motion.div
+                initial={{ scale: 0.9, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                className="bg-white rounded-3xl shadow-2xl max-w-2xl w-full p-8"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="text-center">
+                  <div className="w-20 h-20 bg-gradient-to-br from-indigo-500 to-purple-500 rounded-full flex items-center justify-center mx-auto mb-6">
+                    <Award className="w-10 h-10 text-white" />
+                  </div>
+                  
+                  <h2 className="text-3xl font-bold text-gray-900 mb-4">
+                    Upgrade to Premium
+                  </h2>
+                  
+                  <p className="text-lg text-gray-600 mb-2">
+                    You've completed your <span className="font-bold text-indigo-600">3 free interviews</span> for today!
+                  </p>
+                  
+                  <p className="text-gray-600 mb-8">
+                    Upgrade to Premium for unlimited interviews and advanced features.
+                  </p>
+
+                  {/* Pricing Cards */}
+                  <div className="grid md:grid-cols-2 gap-6 mb-8">
+                    {/* Monthly Plan */}
+                    <div className="border-2 border-gray-200 rounded-2xl p-6 hover:border-indigo-500 transition-all">
+                      <div className="text-sm font-semibold text-indigo-600 mb-2">MONTHLY</div>
+                      <div className="text-4xl font-bold text-gray-900 mb-1">
+                        $7.99
+                        <span className="text-lg text-gray-500 font-normal">/month</span>
+                      </div>
+                      <p className="text-sm text-gray-600 mb-4">Billed monthly</p>
+                      <button className="w-full py-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl font-semibold hover:shadow-lg transition-all">
+                        Choose Monthly
+                      </button>
+                    </div>
+
+                    {/* Yearly Plan */}
+                    <div className="border-2 border-indigo-500 rounded-2xl p-6 relative bg-gradient-to-br from-indigo-50 to-purple-50">
+                      <div className="absolute -top-3 left-1/2 -translate-x-1/2 px-4 py-1 bg-gradient-to-r from-indigo-600 to-purple-600 text-white text-xs font-bold rounded-full">
+                        BEST VALUE
+                      </div>
+                      <div className="text-sm font-semibold text-indigo-600 mb-2">YEARLY</div>
+                      <div className="text-4xl font-bold text-gray-900 mb-1">
+                        $64.99
+                        <span className="text-lg text-gray-500 font-normal">/year</span>
+                      </div>
+                      <p className="text-sm text-green-600 font-semibold mb-4">Save $31 (32% off)</p>
+                      <button className="w-full py-3 bg-gradient-to-r from-indigo-600 to-purple-600 text-white rounded-xl font-semibold hover:shadow-lg transition-all">
+                        Choose Yearly
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Features */}
+                  <div className="text-left bg-gray-50 rounded-2xl p-6 mb-6">
+                    <h3 className="font-bold text-gray-900 mb-4">Premium Features:</h3>
+                    <ul className="space-y-3">
+                      <li className="flex items-center gap-3">
+                        <CheckCircle2 className="w-5 h-5 text-green-500 flex-shrink-0" />
+                        <span className="text-gray-700">Unlimited daily interviews</span>
+                      </li>
+                      <li className="flex items-center gap-3">
+                        <CheckCircle2 className="w-5 h-5 text-green-500 flex-shrink-0" />
+                        <span className="text-gray-700">Advanced AI feedback and analysis</span>
+                      </li>
+                      <li className="flex items-center gap-3">
+                        <CheckCircle2 className="w-5 h-5 text-green-500 flex-shrink-0" />
+                        <span className="text-gray-700">Interview history and progress tracking</span>
+                      </li>
+                      <li className="flex items-center gap-3">
+                        <CheckCircle2 className="w-5 h-5 text-green-500 flex-shrink-0" />
+                        <span className="text-gray-700">Priority support</span>
+                      </li>
+                    </ul>
+                  </div>
+
+                  <button
+                    onClick={() => setShowPaywall(false)}
+                    className="text-gray-500 hover:text-gray-700 text-sm font-medium"
+                  >
+                    Maybe later
+                  </button>
+                </div>
+              </motion.div>
+            </motion.div>
+          )}
 
           {/* Setup Stage */}
           {stage === 'setup' && <motion.div key="setup" initial={{
@@ -1483,13 +1644,20 @@ export const AIInterviewStudio = (_props: AIInterviewStudioProps) => {
                     Detailed AI Feedback
                   </h3>
                   {answers.map((answer, i) => <div key={answer.questionId} className="border-2 border-gray-200 rounded-2xl p-6">
-                      <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center justify-between mb-4">
                         <span className="font-bold text-gray-900">Question {i + 1}</span>
                         {answer.score && <div className={`px-4 py-1.5 rounded-full font-bold ${answer.score >= 85 ? 'bg-emerald-100 text-emerald-700' : answer.score >= 70 ? 'bg-orange-100 text-orange-700' : 'bg-rose-100 text-rose-700'}`}>
                             {answer.score}%
                           </div>}
                       </div>
-                      {answer.feedback && <p className="text-gray-700 mb-3">{answer.feedback}</p>}
+                      
+                      {/* User's Answer */}
+                      <div className="mb-4 p-4 bg-gray-50 rounded-xl border border-gray-200">
+                        <p className="text-xs font-semibold text-gray-500 uppercase mb-2">Your Answer:</p>
+                        <p className="text-gray-800 whitespace-pre-wrap">{answer.answer}</p>
+                      </div>
+                      
+                      {answer.feedback && <p className="text-gray-700 mb-3 font-medium">{answer.feedback}</p>}
                       
                       {/* Strengths */}
                       {answer.strengths && answer.strengths.length > 0 && <div className="mb-3">
